@@ -288,7 +288,7 @@ class PPO:
 
 			for v_target_b, A_sa_b, s_b, a_b, log_pi_old_sa_b in zip(v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf):
 
-				print('optim:', v_target_b.size(), A_sa_b.size(), s_b.size(), a_b.size(), log_pi_old_sa_b.size())
+				# print('optim:', batchsz, v_target_b.size(), A_sa_b.size(), s_b.size(), a_b.size(), log_pi_old_sa_b.size())
 				# 1. update value network
 				v_b = self.value(s_b)
 				loss = torch.pow(v_b - v_target_b, 2).mean()
@@ -310,7 +310,7 @@ class PPO:
 
 				# backprop
 				self.policy_optim.zero_grad()
-				surrogate.backward()
+				surrogate.backward(retain_graph=True)
 				# gradient clipping, for stability
 				nn.utils.clip_grad_norm(self.policy.parameters(), 40)
 				self.policy_optim.step()
