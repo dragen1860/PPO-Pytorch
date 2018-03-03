@@ -14,14 +14,14 @@ def make_env():
 
 def main():
 
-	ppo = PPO(make_env, 1)
+	ppo = PPO(make_env, 2)
 	batchsz = 1024
+
+	ppo.render()
 
 	for i in range(10000):
 
-		batch = ppo.sample(batchsz)
-
-		ppo.update(batch)
+		ppo.update(batchsz)
 
 
 

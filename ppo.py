@@ -5,6 +5,8 @@ from torch import multiprocessing
 from torch.multiprocessing import Queue
 from torch import optim
 from torch import nn
+import time
+
 
 from policy import Policy
 from value import Value
@@ -99,6 +101,7 @@ class PPO:
 
 	def __init__(self, env_cls, thread_num):
 		self.thread_num = thread_num
+		self.env_cls = env_cls
 
 		# we use a dummy env instance to get state dim and action dim etc. information.
 		dummy_env = env_cls()
@@ -229,12 +232,14 @@ class PPO:
 
 
 
-	def update(self, batch):
+	def update(self, batchsz):
 		"""
 		update the policy and value network based on current batch data
 		:param batch: []
 		:return:
 		"""
+		# 1. sample batch
+		batch = self.sample(batchsz)
 
 		# buff.push(s, a, mask, next_s, reward)
 		# s,a,next_s: Variable
@@ -302,7 +307,7 @@ class PPO:
 				# ratio = exp(log_Pi(a|s) - log_Pi_old(a|s)) = Pi(a|s) / Pi_old(a|s)
 				# we use log_pi for stability of numerical operation
 				# [b, 1] => [b]
-				ratio = torch.exp(log_pi_sa - log_pi_old_sa_b).squeeze()
+				ratio = torch.exp(log_pi_sa - log_pi_old_sa_b).squeeze(1)
 				surrogate1 = ratio * A_sa_b
 				surrogate2 = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon) * A_sa_b
 				# this is element-wise comparing.
@@ -317,6 +322,34 @@ class PPO:
 
 
 
+	def render(self):
+		"""
+		call this function to start render thread.
+		:return:
+		"""
+		thread = multiprocessing.Process(target=self.render_)
+		thread.start()
+
+
+	def render_(self):
+		env = self.env_cls()
+		s = env.reset()
+
+		while True:
+
+			# [s_dim] => [1, s_dim]
+			s = Variable(torch.Tensor(s)).unsqueeze(0)
+			# [1, s_dim] => [1, a_dim] => [a_dim]
+			a = self.policy.select_action(s).squeeze().data.numpy()
+			# interact with env
+			s, r, done, _ = env.step(a)
+
+			env.render()
+			time.sleep(0.05)
+
+			if done:
+				s = env.reset()
+				time.sleep(15)
 
 
 
