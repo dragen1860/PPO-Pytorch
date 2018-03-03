@@ -29,7 +29,8 @@ def normal_log_density(x, mean, log_std):
 	"""
 	std = torch.exp(log_std)
 	var = std.pow(2)
-	log_density = -(x - mean).pow(2) / (2 * var) - 0.5 * torch.log(2 * np.pi) - log_std
+	log_density = - torch.pow(x - mean, 2) / (2 * var) - 0.5 * np.log(2 * np.pi) - log_std
+
 	return log_density.sum(1, keepdim=True)
 
 

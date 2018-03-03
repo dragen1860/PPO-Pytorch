@@ -13,7 +13,7 @@ class ReplayMemory:
 		self.memory = []
 
 	def push(self, *args):
-
+		# push()
 		self.memory.append(Transition(*args))
 
 	def sample(self, batchsz=None):
