@@ -3,6 +3,8 @@ import torch
 from torch.autograd import Variable
 from torch import multiprocessing
 from torch.multiprocessing import Queue
+from torch import optim
+from torch import nn
 
 from policy import Policy
 from value import Value
@@ -45,6 +47,8 @@ def sampler(pid, queue, env, policy, batchsz):
 			# interact with env
 			# [1, a_dim] => [a_dim]
 			next_s, reward, done, _ = env.step(a.data[0].numpy())
+			# [s_dim] = [1, s_dim]
+			next_s = Variable(torch.Tensor(next_s).unsqueeze(0))
 
 			# a flag indicates ending or not
 			mask = 0 if done else 1
@@ -81,7 +85,7 @@ class PPO:
 	tau = 0.95
 
 
-	def __init__(self, thread_num, batchsz, env_cls):
+	def __init__(self, env_cls, thread_num):
 		self.thread_num = thread_num
 
 		# we use a dummy env instance to get state dim and action dim etc. information.
@@ -110,6 +114,8 @@ class PPO:
 		# construct policy and value network
 		self.policy = Policy(self.s_dim, self.a_dim)
 		self.value = Value(self.s_dim)
+		self.policy_optim = optim.Adam(self.policy.parameters(), lr=self.lr)
+		self.value_optim = optim.Adam(self.value.parameters(), lr=self.lr, weight_decay=self.l2_reg)
 
 	def sample(self, batchsz):
 		"""
@@ -155,6 +161,55 @@ class PPO:
 		return batch
 
 
+	def estimate_advantage(self, batch, v):
+		"""
+
+		:param batch:
+		:return:
+		"""
+
+		# batch: [(s, a, mask, next_s, reward)]
+		# s, next_s, a: Variable
+		# mask, reward: scalar
+		# batch: namedtuple('state':[b, s_dim], 'next_state':[b, s_dim],...)
+		batchsz = batch.state.size(0)
+		s = batch.state
+		next_s = batch.next_state
+		mask = batch.mask
+		reward = batch.reward
+		a = batch.action
+
+		Q_sa = torch.Tensor(batchsz, 1)
+		delta = torch.Tensor(batchsz, 1)
+		A_sa = torch.Tensor(batchsz, 1)
+
+
+		prev_Q_sa = 0
+		prev_value = 0
+		prev_A_sa = 0
+		for t in reversed(range(batchsz)):
+			# TODO: why no trajectory information saved?
+			# mask here indicates a end of trajectory
+			Q_sa[t] = reward[t] + self.gamma * prev_Q_sa * mask[t]
+
+			# please refer to : https://arxiv.org/abs/1506.02438
+			# for generalized adavantage estimation
+			delta[t] = reward[t] + self.gamma * prev_value * mask[t] - v[t]
+
+			#
+			A_sa[t] = delta[t] + self.gamma * self.tau * prev_A_sa * mask[t]
+
+			# update previous
+			prev_Q_sa = Q_sa[t, 0]
+			prev_value = v[t, 0]
+			prev_A_sa = A_sa[t, 0]
+
+		# normalize A_sa
+		A_sa = (A_sa - A_sa.mean()) / A_sa.std()
+
+		return A_sa, Q_sa
+
+
 
 	def update(self, batch):
 		"""
@@ -162,7 +217,46 @@ class PPO:
 		:param batch: []
 		:return:
 		"""
-		
+
+		# buff.push(s, a, mask, next_s, reward)
+		# s,a,next_s: Variable
+		# mask, reward: scalar
+		s = batch.state
+		a = batch.action
+		v = self.value(s)
+		# log(PI_old(a|s))
+		log_pi_old_sa = self.policy.get_log_prob(s, a)
+
+
+		A_sa, Q_sa = self.estimate_advantage(batch, v)
+
+		for _ in range(5):
+
+			# 1. update value network
+			loss = torch.pow(v - Q_sa, 2).mean()
+			self.value_optim.zero_grad()
+			loss.backward()
+			self.value_optim.step()
+
+			# 2. update policy network
+			log_pi_sa = self.policy.get_log_prob(s, a)
+			# ratio = exp(log_Pi(a|s) - log_Pi_old(a|s)) = Pi(a|s) / Pi_old(a|s)
+			# we use log_pi for stability of numerical operation
+			ratio = torch.exp(log_pi_sa - log_pi_old_sa)
+			surrogate1 = ratio * A_sa
+			surrogate2 = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon) * A_sa
+			surrogate = - torch.min(surrogate1, surrogate2).mean()
+
+			# backprop
+			self.policy_optim.zero_grad()
+			surrogate.backward()
+			# gradient clipping, for stability
+			nn.utils.clip_grad_norm(self.policy.parameters(), 40)
+			self.policy_optim.step()
+
+
+
+
 
 
 
