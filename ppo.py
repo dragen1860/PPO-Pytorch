@@ -273,24 +273,22 @@ class PPO:
 		for _ in range(5):
 
 			perm = torch.randperm(batchsz)
-			# shuffle the variable for value network
-			v, v_target = v[perm], v_target[perm]
-			# shuffle the variable for policy network
-			A_sa, s, a, log_pi_old_sa = A_sa[perm], s[perm], a[perm], log_pi_old_sa[perm]
+			# shuffle the variable for mutliple optimize
+			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = v_target[perm], A_sa[perm], s[perm], a[perm], log_pi_old_sa[perm]
 
 			optim_batchsz = 1024
 			optim_chunk_num = batchsz // optim_batchsz + 1
-			print(v.size(), v_target.size(), A_sa.size(), s.size(), a.size(), log_pi_old_sa.size())
 			# chunk the optim_batch for total batch
-			v, v_target, A_sa, s, a, log_pi_old_sa = torch.chunk(v, optim_chunk_num), \
-													torch.chunk(v_target, optim_chunk_num), \
-													torch.chunk(A_sa, optim_chunk_num), \
-													torch.chunk(s, optim_chunk_num), \
-													torch.chunk(a, optim_chunk_num), \
-													torch.chunk(log_pi_old_sa, optim_chunk_num)
+			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = torch.chunk(v_target_shuf, optim_chunk_num), \
+													torch.chunk(A_sa_shuf, optim_chunk_num), \
+													torch.chunk(s_shuf, optim_chunk_num), \
+													torch.chunk(a_shuf, optim_chunk_num), \
+													torch.chunk(log_pi_old_sa_shuf, optim_chunk_num)
 
 
-			for v_b, v_target_b, A_sa_b, s_b, a_b, log_pi_old_sa_b in zip(v, v_target, A_sa, s, a, log_pi_old_sa):
+			for v_target_b, A_sa_b, s_b, a_b, log_pi_old_sa_b in zip(v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf):
+
+				print('optim:', v_target_b.size(), A_sa_b.size(), s_b.size(), a_b.size(), log_pi_old_sa_b.size())
 				# 1. update value network
 				v_b = self.value(s_b)
 				loss = torch.pow(v_b - v_target_b, 2).mean()
