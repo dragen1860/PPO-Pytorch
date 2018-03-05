@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import torch
 from torch.autograd import Variable
 from torch import multiprocessing
@@ -14,7 +15,8 @@ from replay_memory import ReplayMemory
 
 
 
-def sampler(pid, queue, env, policy, batchsz):
+
+def sampler(pid, queue, env, policy, batchsz, evt):
 	"""
 	This is a sampler function, and it will be called by multiprocess.Process to sample data from environment by multiple
 	threads.
@@ -70,6 +72,8 @@ def sampler(pid, queue, env, policy, batchsz):
 			if done:
 				break
 
+
+
 		sampled_num += real_trajectory_len
 		sampled_trajectory_num += 1
 		# t indicates the valid trajectory lenght
@@ -79,6 +83,8 @@ def sampler(pid, queue, env, policy, batchsz):
 	# when sampling is over, push all buff data into queue
 	queue.put([pid, buff, avg_reward])
 
+
+	evt.wait()
 
 
 class PPO:
@@ -100,6 +106,11 @@ class PPO:
 
 
 	def __init__(self, env_cls, thread_num):
+		"""
+
+		:param env_cls: env class or function, not instance, as we need to create several instance in class.
+		:param thread_num:
+		"""
 		self.thread_num = thread_num
 		self.env_cls = env_cls
 
@@ -129,15 +140,19 @@ class PPO:
 		# construct policy and value network
 		self.policy = Policy(self.s_dim, self.a_dim)
 		self.value = Value(self.s_dim)
+		self.policy.share_memory()
+		self.value.share_memory()
 		self.policy_optim = optim.Adam(self.policy.parameters(), lr=self.lr)
 		self.value_optim = optim.Adam(self.value.parameters(), lr=self.lr, weight_decay=self.l2_reg)
+
+
 
 	def sample(self, batchsz):
 		"""
 		Given batchsz number of task, the batchsz will be splited equally to each threads
 		and when threads return, it merge all data and return
 		:param batchsz:
-		:return:
+		:return: batch
 		"""
 
 		# batchsz will be splitted into each thread,
@@ -148,28 +163,31 @@ class PPO:
 
 		# start threads for pid in range(1, threadnum)
 		# if threadnum = 1, this part will be ignored.
+		evt = multiprocessing.Event()
 		threads = []
-		for i in range(self.thread_num - 1):
-			thread_args = (i + 1, queue, self.env_list[i + 1], self.policy, thread_batchsz)
+		for i in range(self.thread_num):
+			thread_args = (i, queue, self.env_list[i], self.policy, thread_batchsz, evt)
 			threads.append(multiprocessing.Process(target=sampler, args=thread_args))
 		for t in threads:
 			t.start()
 
-		# start pid = 0
-		# all [pid, buff] will be saved in queue
-		sampler(0, queue, self.env_list[0], self.policy, thread_batchsz)
-
-
-		pid, buff0, avg_reward0 = queue.get()
+		# we need to get the first ReplayMemory object and then merge others ReplayMemory use its append function.
+		pid0, buff0, avg_reward0 = queue.get()
 		buff = []
 		avg_reward = [avg_reward0]
 		for _ in range(1, self.thread_num):
 			pid, buff_, avg_reward_ = queue.get()
 			buff.append(buff_)
 			avg_reward.append(avg_reward_)
+		evt.set()
+
+		for t in threads:
+			t.join()
+
 		# buff contains a series of ReplayMemory objects and we use ReplayMemory0 to merage others ReplayMemory objs.
-		if len(buff): # if buff has data, merge it into buff0
-			buff0.append(buff)
+		for mem in buff: # if buff has data, merge it into buff0
+			buff0.append(mem)
+		# now buff saves all the sampled data and avg_reward is the average reward of current sampled data
 		buff = buff0
 		avg_reward = sum(avg_reward) / len(avg_reward)
 
@@ -184,12 +202,11 @@ class PPO:
 
 	def estimate_advantage(self, r, v, mask):
 		"""
-
-		:param s:
-		:param reward:
-		:param v:
-		:param mask:
-		:return:
+		we save a trajectory in continuous space and it means the ending of current trajectory when mask=0.
+		:param r: reward
+		:param v: estimated value
+		:param mask: indicates ending for 0 otherwise 1
+		:return: A(s, a), V-target(s)
 		"""
 		batchsz = v.size(0)
 
@@ -235,7 +252,7 @@ class PPO:
 	def update(self, batchsz):
 		"""
 		update the policy and value network based on current batch data
-		:param batch: []
+		:param batchsz:
 		:return:
 		"""
 		# 1. sample batch
@@ -325,6 +342,7 @@ class PPO:
 	def render(self):
 		"""
 		call this function to start render thread.
+		The function will return when the render thread started.
 		:return:
 		"""
 		thread = multiprocessing.Process(target=self.render_)
@@ -353,4 +371,21 @@ class PPO:
 
 
 
+	def save(self, filename='ppo'):
+
+		torch.save(self.value.state_dict(), filename + '.val.mdl')
+		torch.save(self.policy.state_dict(), filename + '.pol.mdl')
+
+		print('saved network to mdl')
+
+	def load(self, filename='ppo'):
+		value_mdl = filename + '.val.mdl'
+		policy_mdl = filename + '.pol.mdl'
+		if os.path.exists(value_mdl):
+			self.value.load_state_dict(torch.load(value_mdl))
+			print('loaded checkpoint from file:', value_mdl)
+		if os.path.exists(policy_mdl):
+			self.policy.load_state_dict(torch.load(policy_mdl))
+
+			print('loaded checkpoint from file:', policy_mdl)
 

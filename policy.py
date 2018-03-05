@@ -61,6 +61,7 @@ class Policy(nn.Module):
 		# [1, a_dim] => [b, a_dim]
 		a_log_std = self.a_log_std.expand_as(a_mean)
 
+
 		return a_mean, a_log_std
 
 
@@ -73,6 +74,7 @@ class Policy(nn.Module):
 		# forward to get action mean and log_std
 		# [b, s_dim] => [b, a_dim]
 		a_mean, a_log_std = self.forward(s)
+
 		# randomly sample from normal distribution, whose mean and variance come from policy network.
 		# [b, a_dim]
 		a = torch.normal(a_mean, torch.exp(a_log_std))
