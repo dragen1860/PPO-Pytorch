@@ -17,9 +17,9 @@ def main():
 	ppo = PPO(make_env, 10)
 
 	# load model from checkpoint
-	# ppo.load()
+	ppo.load()
 	# comment this line to close evaluaton thread, to speed up training process.
-	# ppo.render(2)
+	ppo.render(2)
 
 	for i in range(10000):
 

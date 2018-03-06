@@ -130,13 +130,21 @@ class PPO:
 		self.policy_optim = optim.Adam(self.policy.parameters(), lr=self.lr)
 		self.value_optim = optim.Adam(self.value.parameters(), lr=self.lr)
 
+
+		# this lock is to keep policy network weighted untouched when executing render thread.
+		# The render thread depends on policy network to get latest policy and in order to make sure the policy network
+		# unchanged when rendering one trajectory, we use this lock to lock the weights of policy network.
+		# TODO: lock can not work yet.
+		self.lock = multiprocessing.Lock()
+
+
 	def est_adv(self, r, v, mask):
 		"""
-		we save a trajectory in continuous space and it means the ending of current trajectory when mask=0.
-		:param r: reward
-		:param v: estimated value
-		:param mask: indicates ending for 0 otherwise 1
-		:return: A(s, a), V-target(s)
+		we save a trajectory in continuous space and it reaches the ending of current trajectory when mask=0.
+		:param r: reward, Tensor, [b]
+		:param v: estimated value, Tensor, [b]
+		:param mask: indicates ending for 0 otherwise 1, Tensor, [b]
+		:return: A(s, a), V-target(s), both Tensor
 		"""
 		batchsz = v.size(0)
 
@@ -175,24 +183,36 @@ class PPO:
 		return A_sa, v_target
 
 	def update(self, batchsz):
-
+		"""
+		firstly sample batchsz items and then perform optimize algorithms.
+		:param batchsz:
+		:return:
+		"""
+		# 1. sample data asynchronously
 		batch = self.sample(batchsz)
 
+		# data in batch is : batch.state: ([1, s_dim], [1, s_dim]...)
+		# batch.action: ([1, a_dim], [1, a_dim]...)
+		# batch.reward/ batch.mask: ([1], [1]...)
 		s = torch.from_numpy(np.stack(batch.state))
 		a = torch.from_numpy(np.stack(batch.action))
 		r = torch.Tensor(np.stack(batch.reward))
 		mask = torch.Tensor(np.stack(batch.mask))
-
-		v = self.value(Variable(s)).data
-		log_pi_old_sa = self.policy.get_log_prob(Variable(s), Variable(a)).data
-
-		A_sa, v_target = self.est_adv(r, v.squeeze(), mask)
-		v = v.unsqueeze(1)
-		A_sa = (A_sa.squeeze())
-		v_target = (v_target.squeeze())
-
 		batchsz = s.size(0)
 
+		# 2. get estimated V(s) and PI_old(s, a),
+		# actually, PI_old(s, a) can be saved when interacting with env, so as to save the time of one forward elapsed.
+		# v: [b, 1] => [b]
+		v = self.value(Variable(s)).data.squeeze()
+		log_pi_old_sa = self.policy.get_log_prob(Variable(s), Variable(a)).data
+
+		# 3. estimate advantage and v_target according to GAE and Bellman Equation
+		A_sa, v_target = self.est_adv(r, v, mask)
+
+
+		# 4. backprop.
+		# the following code episode will involve in neural network forward/backward, hence we convert related variable
+		# into Variable
 		v_target = Variable(v_target)
 		A_sa = Variable(A_sa)
 		s = Variable(s)
@@ -201,11 +221,13 @@ class PPO:
 
 		for _ in range(5):
 
+			# 4.1 shuffle current batch
 			perm = torch.randperm(batchsz)
 			# shuffle the variable for mutliple optimize
 			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = v_target[perm], A_sa[perm], s[perm], a[perm], \
 			                                                               log_pi_old_sa[perm]
 
+			# 4.2 get mini-batch for optimizing
 			optim_batchsz = 4096
 			optim_chunk_num = int(np.ceil(batchsz / optim_batchsz))
 			# chunk the optim_batch for total batch
@@ -215,7 +237,7 @@ class PPO:
 			                                                               torch.chunk(a_shuf, optim_chunk_num), \
 			                                                               torch.chunk(log_pi_old_sa_shuf,
 			                                                                           optim_chunk_num)
-
+			# 4.3 iterate all mini-batch to optimize
 			for v_target_b, A_sa_b, s_b, a_b, log_pi_old_sa_b in zip(v_target_shuf, A_sa_shuf, s_shuf, a_shuf,
 			                                                         log_pi_old_sa_shuf):
 				# print('optim:', batchsz, v_target_b.size(), A_sa_b.size(), s_b.size(), a_b.size(), log_pi_old_sa_b.size())
@@ -235,16 +257,19 @@ class PPO:
 				# [b, 1] => [b]
 				ratio = torch.exp(log_pi_sa - log_pi_old_sa_b).squeeze(1)
 				surrogate1 = ratio * A_sa_b
-				surrogate2 = torch.clamp(ratio, 1 - 0.2, 1 + 0.2) * A_sa_b
+				surrogate2 = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon) * A_sa_b
 				# this is element-wise comparing.
+				# we add negative symbol to convert gradient ascent to gradient descent.
 				surrogate = - torch.min(surrogate1, surrogate2).mean()
 
 				# backprop
 				self.policy_optim.zero_grad()
 				surrogate.backward(retain_graph=True)
 				# gradient clipping, for stability
-				torch.nn.utils.clip_grad_norm(self.policy.parameters(), 40)
+				torch.nn.utils.clip_grad_norm(self.policy.parameters(), 10)
+				# self.lock.acquire() # retain lock to update weights
 				self.policy_optim.step()
+				# self.lock.release() # release lock
 
 	def sample(self, batchsz):
 		"""
@@ -258,10 +283,12 @@ class PPO:
 		# final batchsz maybe larger than batchsz parameters
 		thread_batchsz = np.ceil(batchsz / self.thread_num).astype(np.int32)
 		# buffer to save all data
-		queue = multiprocessing.SimpleQueue()
+		queue = multiprocessing.Queue()
 
 		# start threads for pid in range(1, threadnum)
 		# if threadnum = 1, this part will be ignored.
+		# when save tensor in Queue, the thread should keep alive till Queue.get(),
+		# please refer to : https://discuss.pytorch.org/t/using-torch-tensor-over-multiprocessing-queue-process-fails/2847/2
 		evt = multiprocessing.Event()
 		threads = []
 		for i in range(self.thread_num):
@@ -274,15 +301,12 @@ class PPO:
 
 		# we need to get the first ReplayMemory object and then merge others ReplayMemory use its append function.
 		pid0, buff0, avg_reward0 = queue.get()
-		buff = []
 		avg_reward = [avg_reward0]
 		for _ in range(1, self.thread_num):
 			pid, buff_, avg_reward_ = queue.get()
-			buff.append(buff_)
+			buff0.append(buff_) # merge current ReplayMemory into buff0
 			avg_reward.append(avg_reward_)
-		# buff contains a series of ReplayMemory objects and we use ReplayMemory0 to merage others ReplayMemory objs.
-		for mem in buff:  # if buff has data, merge it into buff0
-			buff0.append(mem)
+
 		# now buff saves all the sampled data and avg_reward is the average reward of current sampled data
 		buff = buff0
 		avg_reward = np.array(avg_reward).mean()
@@ -310,7 +334,6 @@ class PPO:
 		s = env.reset()
 
 		while True:
-
 			# [s_dim] => [1, s_dim]
 			s = Variable(torch.Tensor(s)).unsqueeze(0)
 			# [1, s_dim] => [1, a_dim] => [a_dim]
