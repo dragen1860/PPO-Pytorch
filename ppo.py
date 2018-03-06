@@ -1,19 +1,14 @@
+import os, time
 import numpy as np
-import os
-import torch
-from torch.autograd import Variable
-from torch import multiprocessing
-from torch.multiprocessing import Queue
-from torch import optim
-from torch import nn
-import time
 
+import torch
+from torch import optim
+from torch import multiprocessing
+from torch.autograd import Variable
 
 from policy import Policy
 from value import Value
 from replay_memory import ReplayMemory
-
-
 
 
 def sampler(pid, queue, env, policy, batchsz):
@@ -35,25 +30,26 @@ def sampler(pid, queue, env, policy, batchsz):
 	# the final sampled number may be larger than batchsz.
 
 	sampled_num = 0
-	sampled_trajectory_num = 0
-	trajectory_len = 100
-	real_trajectory_len = 0
+	sampled_traj_num = 0
+	traj_len = 200
+	real_traj_len = 0
 	avg_reward = []
 
 	while sampled_num < batchsz:
 		# total reward per trajectory
-		trajectory_reward = 0
+		traj_reward = 0
 		# for each trajectory, we reset the env and get initial state
 		s = env.reset()
-		for t in range(trajectory_len):
+
+		for t in range(traj_len):
 
 			# [1, s_dim] => [1, a_dim]
+			# convert numpy data to Variable and then convert back to numpy
 			a = policy.select_action(Variable(torch.Tensor(s).unsqueeze(0))).data[0].numpy()
 
 			# interact with env
 			# [1, a_dim] => [a_dim]
 			next_s, reward, done, _ = env.step(a)
-
 
 			# a flag indicates ending or not
 			mask = 0 if done else 1
@@ -61,28 +57,27 @@ def sampler(pid, queue, env, policy, batchsz):
 			# save to queue
 			buff.push(s, a, mask, next_s, reward)
 
-			# update
+			# update per step
 			s = next_s
-			trajectory_reward += reward
-			real_trajectory_len = t
+			traj_reward += reward
+			real_traj_len = t
 
 			if done:
 				break
 
-
-		sampled_num += real_trajectory_len
-		sampled_trajectory_num += 1
+		# this is end of one trajectory
+		sampled_num += real_traj_len
+		sampled_traj_num += 1
 		# t indicates the valid trajectory lenght
-		avg_reward.append(trajectory_reward )
+		avg_reward.append(traj_reward)
 
-	avg_reward = sum(avg_reward)  / len(avg_reward)
+	# this is end of sampling all batchsz of items.
+	avg_reward = sum(avg_reward) / len(avg_reward)
 	# when sampling is over, push all buff data into queue
 	queue.put([pid, buff, avg_reward])
 
 
-
 class PPO:
-
 	# discounted factor
 	gamma = 0.99
 
@@ -98,13 +93,13 @@ class PPO:
 	# tau for generalized advantage estimation
 	tau = 0.95
 
-
 	def __init__(self, env_cls, thread_num):
 		"""
 
 		:param env_cls: env class or function, not instance, as we need to create several instance in class.
 		:param thread_num:
 		"""
+
 		self.thread_num = thread_num
 		self.env_cls = env_cls
 
@@ -123,76 +118,17 @@ class PPO:
 			self.a_dim = dummy_env.action_space.shape[0]
 			self.is_discrete_action = False
 
-
-
 		# initialize envs for each thread
 		self.env_list = []
 		for _ in range(thread_num):
 			self.env_list.append(env_cls())
 
-
 		# construct policy and value network
 		self.policy = Policy(self.s_dim, self.a_dim)
 		self.value = Value(self.s_dim)
 
-
 		self.policy_optim = optim.Adam(self.policy.parameters(), lr=self.lr)
 		self.value_optim = optim.Adam(self.value.parameters(), lr=self.lr)
-
-
-
-	def sample(self, batchsz):
-		"""
-		Given batchsz number of task, the batchsz will be splited equally to each threads
-		and when threads return, it merge all data and return
-		:param batchsz:
-		:return: batch
-		"""
-
-		# batchsz will be splitted into each thread,
-		# final batchsz maybe larger than batchsz parameters
-		thread_batchsz = np.ceil(batchsz / self.thread_num).astype(np.int32)
-		# buffer to save all data
-		queue = Queue()
-
-		# start threads for pid in range(1, threadnum)
-		# if threadnum = 1, this part will be ignored.
-		evt = multiprocessing.Event()
-		threads = []
-		for i in range(self.thread_num):
-			thread_args = (i, queue, self.env_list[i], self.policy, thread_batchsz)
-			threads.append(multiprocessing.Process(target=sampler, args=thread_args))
-		for t in threads:
-			t.start()
-
-		# we need to get the first ReplayMemory object and then merge others ReplayMemory use its append function.
-		pid0, buff0, avg_reward0 = queue.get()
-		buff = []
-		avg_reward = [avg_reward0]
-		for _ in range(1, self.thread_num):
-			pid, buff_, avg_reward_ = queue.get()
-			buff.append(buff_)
-			avg_reward.append(avg_reward_)
-		evt.set()
-
-		for t in threads:
-			t.join()
-
-		# buff contains a series of ReplayMemory objects and we use ReplayMemory0 to merage others ReplayMemory objs.
-		for mem in buff: # if buff has data, merge it into buff0
-			buff0.append(mem)
-		# now buff saves all the sampled data and avg_reward is the average reward of current sampled data
-		buff = buff0
-		avg_reward = sum(avg_reward) / len(avg_reward)
-
-		print('avg reward:', avg_reward)
-
-		# sample a batch from buff
-		# here sample all since we assign the total number of threads is batchsz
-		batch = buff.sample()
-
-		return batch
-
 
 	def est_adv(self, r, v, mask):
 		"""
@@ -204,16 +140,15 @@ class PPO:
 		"""
 		batchsz = v.size(0)
 
+		# v_target is worked out by Bellman equation.
 		v_target = torch.Tensor(batchsz)
 		delta = torch.Tensor(batchsz)
 		A_sa = torch.Tensor(batchsz)
-
 
 		prev_v_target = 0
 		prev_v = 0
 		prev_A_sa = 0
 		for t in reversed(range(batchsz)):
-
 			# mask here indicates a end of trajectory
 			# this value will be treated as the target value of value network.
 			# mask = 0 means the immediate reward is the real V(s) since it's end of trajectory.
@@ -223,7 +158,7 @@ class PPO:
 			# please refer to : https://arxiv.org/abs/1506.02438
 			# for generalized adavantage estimation
 			# formula: delta(s_t) = r_t + gamma * V(s_t+1) - V(s_t)
-			delta[t] = r[t] + self.gamma * prev_v * mask[t] - v.data[t]
+			delta[t] = r[t] + self.gamma * prev_v * mask[t] - v[t]
 
 			# formula: A(s, a) = delta(s_t) + gamma * lamda * A(s_t+1, a_t+1)
 			# here use symbol tau as lambda, but original paper uses symbol lambda.
@@ -231,80 +166,58 @@ class PPO:
 
 			# update previous
 			prev_v_target = v_target[t]
-			prev_v = v.data[t]
+			prev_v = v[t]
 			prev_A_sa = A_sa[t]
 
 		# normalize A_sa
 		A_sa = (A_sa - A_sa.mean()) / A_sa.std()
-		A_sa = Variable(A_sa)
-		v_target = Variable(v_target)
 
 		return A_sa, v_target
 
-
-
 	def update(self, batchsz):
-		"""
-		update the policy and value network based on current batch data
-		:param batchsz:
-		:return:
-		"""
-		# 1. sample batch
+
 		batch = self.sample(batchsz)
 
-		# buff.push(s, a, mask, next_s, reward)
-		# s,a,next_s: Variable
-		# mask, reward: scalar
-		s = Variable(torch.from_numpy(np.stack(batch.state)))
-		a = Variable(torch.from_numpy(np.stack(batch.action)))
-		r = torch.Tensor(batch.reward)
-		mask = torch.Tensor(batch.mask)
+		s = torch.from_numpy(np.stack(batch.state))
+		a = torch.from_numpy(np.stack(batch.action))
+		r = torch.Tensor(np.stack(batch.reward))
+		mask = torch.Tensor(np.stack(batch.mask))
 
-		# when we get s/a/next_s from ReplayMemory, it has the shape: ([1, dim], [1, dim]...)
-		# we need to convert it to Variable
-		# ([1, dim],...) => [b, dim]
-		# s = torch.cat(s, dim=0)
+		v = self.value(Variable(s)).data
+		log_pi_old_sa = self.policy.get_log_prob(Variable(s), Variable(a)).data
+
+		A_sa, v_target = self.est_adv(r, v.squeeze(), mask)
+		v = v.unsqueeze(1)
+		A_sa = (A_sa.squeeze())
+		v_target = (v_target.squeeze())
+
 		batchsz = s.size(0)
-		# ([1, dim],...) => [b, dim]
-		# a = torch.cat(a, dim=0)
 
-		# get estimated value
-		# [b, 1] => [b]
-		v = self.value(s).squeeze()
-		# log(PI_old(a|s))
-		log_pi_old_sa = self.policy.get_log_prob(s, a)
+		v_target = Variable(v_target)
+		A_sa = Variable(A_sa)
+		s = Variable(s)
+		a = Variable(a)
+		log_pi_old_sa = Variable(log_pi_old_sa)
 
-		# estimate advantage and v_target for sampled trajectory.
-		A_sa, v_target = self.est_adv(r, v, mask)
-
-
-		"""
-		Now we have :
-		s, Variable,        [b, s_dim]
-		a, Variable,        [b, a_dim]
-		r, Tensor,          [b]
-		mask, Tensor        [b]
-		v, Variable         [b]
-		v_target, Variable, [b]
-		"""
 		for _ in range(5):
 
 			perm = torch.randperm(batchsz)
 			# shuffle the variable for mutliple optimize
-			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = v_target[perm], A_sa[perm], s[perm], a[perm], log_pi_old_sa[perm]
+			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = v_target[perm], A_sa[perm], s[perm], a[perm], \
+			                                                               log_pi_old_sa[perm]
 
 			optim_batchsz = 4096
 			optim_chunk_num = int(np.ceil(batchsz / optim_batchsz))
 			# chunk the optim_batch for total batch
 			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = torch.chunk(v_target_shuf, optim_chunk_num), \
-													torch.chunk(A_sa_shuf, optim_chunk_num), \
-													torch.chunk(s_shuf, optim_chunk_num), \
-													torch.chunk(a_shuf, optim_chunk_num), \
-													torch.chunk(log_pi_old_sa_shuf, optim_chunk_num)
+			                                                               torch.chunk(A_sa_shuf, optim_chunk_num), \
+			                                                               torch.chunk(s_shuf, optim_chunk_num), \
+			                                                               torch.chunk(a_shuf, optim_chunk_num), \
+			                                                               torch.chunk(log_pi_old_sa_shuf,
+			                                                                           optim_chunk_num)
 
-
-			for v_target_b, A_sa_b, s_b, a_b, log_pi_old_sa_b in zip(v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf):
-
+			for v_target_b, A_sa_b, s_b, a_b, log_pi_old_sa_b in zip(v_target_shuf, A_sa_shuf, s_shuf, a_shuf,
+			                                                         log_pi_old_sa_shuf):
 				# print('optim:', batchsz, v_target_b.size(), A_sa_b.size(), s_b.size(), a_b.size(), log_pi_old_sa_b.size())
 				# 1. update value network
 				v_b = self.value(s_b)
@@ -322,7 +235,7 @@ class PPO:
 				# [b, 1] => [b]
 				ratio = torch.exp(log_pi_sa - log_pi_old_sa_b).squeeze(1)
 				surrogate1 = ratio * A_sa_b
-				surrogate2 = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon) * A_sa_b
+				surrogate2 = torch.clamp(ratio, 1 - 0.2, 1 + 0.2) * A_sa_b
 				# this is element-wise comparing.
 				surrogate = - torch.min(surrogate1, surrogate2).mean()
 
@@ -330,22 +243,69 @@ class PPO:
 				self.policy_optim.zero_grad()
 				surrogate.backward(retain_graph=True)
 				# gradient clipping, for stability
-				nn.utils.clip_grad_norm(self.policy.parameters(), 40)
+				torch.nn.utils.clip_grad_norm(self.policy.parameters(), 40)
 				self.policy_optim.step()
 
+	def sample(self, batchsz):
+		"""
+		Given batchsz number of task, the batchsz will be splited equally to each threads
+		and when threads return, it merge all data and return
+		:param batchsz:
+		:return: batch
+		"""
 
+		# batchsz will be splitted into each thread,
+		# final batchsz maybe larger than batchsz parameters
+		thread_batchsz = np.ceil(batchsz / self.thread_num).astype(np.int32)
+		# buffer to save all data
+		queue = multiprocessing.SimpleQueue()
 
-	def render(self):
+		# start threads for pid in range(1, threadnum)
+		# if threadnum = 1, this part will be ignored.
+		evt = multiprocessing.Event()
+		threads = []
+		for i in range(self.thread_num):
+			thread_args = (i, queue, self.env_list[i], self.policy, thread_batchsz)
+			threads.append(multiprocessing.Process(target=sampler, args=thread_args))
+		for t in threads:
+			# set the thread as daemon, and it will be killed once the main thread is stoped.
+			t.daemon = True
+			t.start()
+
+		# we need to get the first ReplayMemory object and then merge others ReplayMemory use its append function.
+		pid0, buff0, avg_reward0 = queue.get()
+		buff = []
+		avg_reward = [avg_reward0]
+		for _ in range(1, self.thread_num):
+			pid, buff_, avg_reward_ = queue.get()
+			buff.append(buff_)
+			avg_reward.append(avg_reward_)
+		# buff contains a series of ReplayMemory objects and we use ReplayMemory0 to merage others ReplayMemory objs.
+		for mem in buff:  # if buff has data, merge it into buff0
+			buff0.append(mem)
+		# now buff saves all the sampled data and avg_reward is the average reward of current sampled data
+		buff = buff0
+		avg_reward = np.array(avg_reward).mean()
+
+		print('avg reward:', avg_reward)
+
+		return buff.sample()
+
+	def render(self, interval=8):
 		"""
 		call this function to start render thread.
 		The function will return when the render thread started.
 		:return:
 		"""
-		thread = multiprocessing.Process(target=self.render_)
+		thread = multiprocessing.Process(target=self.render_, args=(interval,))
 		thread.start()
 
-
-	def render_(self):
+	def render_(self, interval):
+		"""
+		This function should be called by render()
+		:param interval:
+		:return:
+		"""
 		env = self.env_cls()
 		s = env.reset()
 
@@ -359,13 +319,10 @@ class PPO:
 			s, r, done, _ = env.step(a)
 
 			env.render()
-			time.sleep(0.05)
 
 			if done:
 				s = env.reset()
-				time.sleep(7)
-
-
+				time.sleep(interval)
 
 	def save(self, filename='ppo'):
 
@@ -384,4 +341,3 @@ class PPO:
 			self.policy.load_state_dict(torch.load(policy_mdl))
 
 			print('loaded checkpoint from file:', policy_mdl)
-

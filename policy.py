@@ -34,14 +34,9 @@ def normal_log_density(x, mean, log_std):
 	return log_density.sum(1, keepdim=True)
 
 
-
-
 class Policy(nn.Module):
-
-
 	def __init__(self, s_dim, a_dim):
 		super(Policy, self).__init__()
-
 
 		self.net = nn.Sequential(nn.Linear(s_dim, 128),
 		                         nn.ReLU(),
@@ -54,16 +49,13 @@ class Policy(nn.Module):
 		self.a_log_std = nn.Parameter(torch.zeros(1, a_dim))
 
 	def forward(self, s):
-
 		# [b, s_dim] => [b, a_dim]
 		a_mean = self.net(s)
 
 		# [1, a_dim] => [b, a_dim]
 		a_log_std = self.a_log_std.expand_as(a_mean)
 
-
 		return a_mean, a_log_std
-
 
 	def select_action(self, s):
 		"""
@@ -81,8 +73,6 @@ class Policy(nn.Module):
 
 		return a
 
-
-
 	def get_log_prob(self, s, a):
 		"""
 
@@ -98,6 +88,3 @@ class Policy(nn.Module):
 		log_prob = normal_log_density(a, a_mean, a_log_std)
 
 		return log_prob
-
-
-
