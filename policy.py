@@ -44,9 +44,9 @@ class Policy(nn.Module):
 
 
 		self.net = nn.Sequential(nn.Linear(s_dim, 128),
-		                         nn.Tanh(),
+		                         nn.ReLU(),
 		                         nn.Linear(128, 128),
-		                         nn.Tanh(),
+		                         nn.ReLU(),
 		                         nn.Linear(128, a_dim))
 
 		# this is Variable of nn.Module, added to class automatically

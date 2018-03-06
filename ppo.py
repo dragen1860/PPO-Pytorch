@@ -36,7 +36,7 @@ def sampler(pid, queue, env, policy, batchsz, evt):
 
 	sampled_num = 0
 	sampled_trajectory_num = 0
-	trajectory_len = 20
+	trajectory_len = 100
 	real_trajectory_len = 0
 	avg_reward = []
 
@@ -55,6 +55,7 @@ def sampler(pid, queue, env, policy, batchsz, evt):
 			# interact with env
 			# [1, a_dim] => [a_dim]
 			next_s, reward, done, _ = env.step(a.data[0].numpy())
+
 			# [s_dim] = [1, s_dim]
 			next_s = Variable(torch.Tensor(next_s).unsqueeze(0))
 
@@ -64,7 +65,7 @@ def sampler(pid, queue, env, policy, batchsz, evt):
 			# save to queue
 			buff.push(s, a, mask, next_s, reward)
 
-			#
+			# update
 			s = next_s
 			trajectory_reward += reward
 			real_trajectory_len = t
@@ -73,15 +74,15 @@ def sampler(pid, queue, env, policy, batchsz, evt):
 				break
 
 
-
 		sampled_num += real_trajectory_len
 		sampled_trajectory_num += 1
 		# t indicates the valid trajectory lenght
-		avg_reward.append(trajectory_reward / real_trajectory_len)
+		avg_reward.append(trajectory_reward )
 
-	avg_reward = sum(avg_reward) / len(avg_reward)
+	avg_reward = sum(avg_reward)  / len(avg_reward)
 	# when sampling is over, push all buff data into queue
 	queue.put([pid, buff, avg_reward])
+
 
 
 	evt.wait()
@@ -93,7 +94,7 @@ class PPO:
 	gamma = 0.99
 
 	# l2 regulazier coefficient
-	l2_reg = 1e-3
+	l2_reg = 0
 
 	# learning rate
 	lr = 3e-4
@@ -140,10 +141,10 @@ class PPO:
 		# construct policy and value network
 		self.policy = Policy(self.s_dim, self.a_dim)
 		self.value = Value(self.s_dim)
-		self.policy.share_memory()
-		self.value.share_memory()
+
+
 		self.policy_optim = optim.Adam(self.policy.parameters(), lr=self.lr)
-		self.value_optim = optim.Adam(self.value.parameters(), lr=self.lr, weight_decay=self.l2_reg)
+		self.value_optim = optim.Adam(self.value.parameters(), lr=self.lr)
 
 
 
@@ -157,7 +158,7 @@ class PPO:
 
 		# batchsz will be splitted into each thread,
 		# final batchsz maybe larger than batchsz parameters
-		thread_batchsz = np.ceil(batchsz // self.thread_num).astype(np.int32)
+		thread_batchsz = np.ceil(batchsz / self.thread_num).astype(np.int32)
 		# buffer to save all data
 		queue = Queue()
 
@@ -200,7 +201,7 @@ class PPO:
 		return batch
 
 
-	def estimate_advantage(self, r, v, mask):
+	def est_adv(self, r, v, mask):
 		"""
 		we save a trajectory in continuous space and it means the ending of current trajectory when mask=0.
 		:param r: reward
@@ -280,11 +281,12 @@ class PPO:
 		# log(PI_old(a|s))
 		log_pi_old_sa = self.policy.get_log_prob(s, a)
 
+		# estimate advantage and v_target for sampled trajectory.
+		A_sa, v_target = self.est_adv(r, v, mask)
 
-		A_sa, v_target = self.estimate_advantage(r, v, mask)
 
 		"""
-		Here we have :
+		Now we have :
 		s, Variable,        [b, s_dim]
 		a, Variable,        [b, a_dim]
 		r, Tensor,          [b]
@@ -298,8 +300,8 @@ class PPO:
 			# shuffle the variable for mutliple optimize
 			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = v_target[perm], A_sa[perm], s[perm], a[perm], log_pi_old_sa[perm]
 
-			optim_batchsz = 1024
-			optim_chunk_num = batchsz // optim_batchsz + 1
+			optim_batchsz = 4096
+			optim_chunk_num = int(np.ceil(batchsz / optim_batchsz))
 			# chunk the optim_batch for total batch
 			v_target_shuf, A_sa_shuf, s_shuf, a_shuf, log_pi_old_sa_shuf = torch.chunk(v_target_shuf, optim_chunk_num), \
 													torch.chunk(A_sa_shuf, optim_chunk_num), \
@@ -316,9 +318,10 @@ class PPO:
 				loss = torch.pow(v_b - v_target_b, 2).mean()
 				self.value_optim.zero_grad()
 				loss.backward()
+				# nn.utils.clip_grad_norm(self.value.parameters(), 4)
 				self.value_optim.step()
 
-				# 2. update policy network
+				# 2. update policy network by clipping
 				# [b, 1]
 				log_pi_sa = self.policy.get_log_prob(s_b, a_b)
 				# ratio = exp(log_Pi(a|s) - log_Pi_old(a|s)) = Pi(a|s) / Pi_old(a|s)
@@ -334,7 +337,7 @@ class PPO:
 				self.policy_optim.zero_grad()
 				surrogate.backward(retain_graph=True)
 				# gradient clipping, for stability
-				nn.utils.clip_grad_norm(self.policy.parameters(), 40)
+				nn.utils.clip_grad_norm(self.policy.parameters(), 4)
 				self.policy_optim.step()
 
 
@@ -367,7 +370,7 @@ class PPO:
 
 			if done:
 				s = env.reset()
-				time.sleep(15)
+				time.sleep(10)
 
 
 

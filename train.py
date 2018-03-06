@@ -16,13 +16,13 @@ def main():
 
 	torch.set_default_tensor_type('torch.DoubleTensor')
 
-	batchsz = 1024
-	ppo = PPO(make_env, 3)
+	batchsz = 2048
+	ppo = PPO(make_env, 1)
 
 	# load model from checkpoint
-	ppo.load()
+	# ppo.load()
 	# comment this line to close evaluaton thread, to speed up training process.
-	# ppo.render()
+	ppo.render()
 
 	for i in range(10000):
 
