@@ -22,7 +22,7 @@ def main():
 	# load model from checkpoint
 	# ppo.load()
 	# comment this line to close evaluaton thread, to speed up training process.
-	ppo.render()
+	# ppo.render()
 
 	for i in range(10000):
 

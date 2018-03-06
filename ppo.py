@@ -16,7 +16,7 @@ from replay_memory import ReplayMemory
 
 
 
-def sampler(pid, queue, env, policy, batchsz, evt):
+def sampler(pid, queue, env, policy, batchsz):
 	"""
 	This is a sampler function, and it will be called by multiprocess.Process to sample data from environment by multiple
 	threads.
@@ -45,19 +45,15 @@ def sampler(pid, queue, env, policy, batchsz, evt):
 		trajectory_reward = 0
 		# for each trajectory, we reset the env and get initial state
 		s = env.reset()
-		# [s_dim] => [1, s_dim]
-		s = Variable(torch.Tensor(s).unsqueeze(0))
 		for t in range(trajectory_len):
 
 			# [1, s_dim] => [1, a_dim]
-			a = policy.select_action(s)
+			a = policy.select_action(Variable(torch.Tensor(s).unsqueeze(0))).data[0].numpy()
 
 			# interact with env
 			# [1, a_dim] => [a_dim]
-			next_s, reward, done, _ = env.step(a.data[0].numpy())
+			next_s, reward, done, _ = env.step(a)
 
-			# [s_dim] = [1, s_dim]
-			next_s = Variable(torch.Tensor(next_s).unsqueeze(0))
 
 			# a flag indicates ending or not
 			mask = 0 if done else 1
@@ -83,9 +79,6 @@ def sampler(pid, queue, env, policy, batchsz, evt):
 	# when sampling is over, push all buff data into queue
 	queue.put([pid, buff, avg_reward])
 
-
-
-	evt.wait()
 
 
 class PPO:
@@ -167,7 +160,7 @@ class PPO:
 		evt = multiprocessing.Event()
 		threads = []
 		for i in range(self.thread_num):
-			thread_args = (i, queue, self.env_list[i], self.policy, thread_batchsz, evt)
+			thread_args = (i, queue, self.env_list[i], self.policy, thread_batchsz)
 			threads.append(multiprocessing.Process(target=sampler, args=thread_args))
 		for t in threads:
 			t.start()
@@ -262,18 +255,18 @@ class PPO:
 		# buff.push(s, a, mask, next_s, reward)
 		# s,a,next_s: Variable
 		# mask, reward: scalar
-		s = batch.state
-		a = batch.action
+		s = Variable(torch.from_numpy(np.stack(batch.state)))
+		a = Variable(torch.from_numpy(np.stack(batch.action)))
 		r = torch.Tensor(batch.reward)
 		mask = torch.Tensor(batch.mask)
 
 		# when we get s/a/next_s from ReplayMemory, it has the shape: ([1, dim], [1, dim]...)
 		# we need to convert it to Variable
 		# ([1, dim],...) => [b, dim]
-		s = torch.cat(s, dim=0)
+		# s = torch.cat(s, dim=0)
 		batchsz = s.size(0)
 		# ([1, dim],...) => [b, dim]
-		a = torch.cat(a, dim=0)
+		# a = torch.cat(a, dim=0)
 
 		# get estimated value
 		# [b, 1] => [b]
@@ -337,7 +330,7 @@ class PPO:
 				self.policy_optim.zero_grad()
 				surrogate.backward(retain_graph=True)
 				# gradient clipping, for stability
-				nn.utils.clip_grad_norm(self.policy.parameters(), 4)
+				nn.utils.clip_grad_norm(self.policy.parameters(), 40)
 				self.policy_optim.step()
 
 
@@ -370,7 +363,7 @@ class PPO:
 
 			if done:
 				s = env.reset()
-				time.sleep(10)
+				time.sleep(7)
 
 
 
