@@ -38,11 +38,11 @@ class Policy(nn.Module):
 	def __init__(self, s_dim, a_dim):
 		super(Policy, self).__init__()
 
-		self.net = nn.Sequential(nn.Linear(s_dim, 128),
+		self.net = nn.Sequential(nn.Linear(s_dim, 64),
 		                         nn.ReLU(),
-		                         nn.Linear(128, 128),
+		                         nn.Linear(64, 64),
 		                         nn.ReLU(),
-		                         nn.Linear(128, a_dim))
+		                         nn.Linear(64, a_dim))
 
 		# this is Variable of nn.Module, added to class automatically
 		# it will be optimized as well.
